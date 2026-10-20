@@ -1,0 +1,13 @@
+[Unit]
+Description=NVIDIA nvml-mock NRI plugin (injects simulated GPU devices)
+After=nvml-mock-agent.service
+BindsTo=nvml-mock-agent.service
+ConditionPathExists=/var/lib/nvml-mock-install/installed
+
+[Service]
+ExecStart=/usr/local/sbin/nvml-mock-nri-start.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,86 @@
+# Add to your KubeVirt NodeProvider's spec.kubeVirt.nodeTypes (snippet, not a full object).
+#
+# One simulated-GPU VM: a plain KubeVirt VM (no HostDevice, no vfio) pinned to the
+# mock GPU host. The GPU comes from nvml-mock inside the guest, either from the
+# nvml-mock-driver Argo CD task (the Stack templates) or from cloud-init
+# (cloud-init/, MachineConfigTemplate nvml-mock-b200).
+- name: kvm-mock-gpu
+  displayName: KVM VM + 1 simulated GPU (2 CPU, 3 GiB)
+  # Slots on the mock GPU host. 4 x (1 CPU, 3 GiB) fits an 8-core, 16 GiB host.
+  maxCapacity: 4
+  # Declared, not derived from the VM template, so nvidia.com/gpu is part of the
+  # NodeType's capacity: vCluster copies these into the Karpenter instance type,
+  # which is what lets a dynamic pool launch this type for a pod requesting a GPU.
+  resources:
+    cpu: "2"
+    memory: 3Gi
+    nvidia.com/gpu: "1"
+  properties:
+    kubevirt.vcluster.com/capacity-type: on-demand
+    # GPU Operator images plus nvml-mock; no driver build.
+    kubevirt.vcluster.com/root-disk-size: 30Gi
+    vcluster.com/accelerator: mock-gpu
+  mergeVirtualMachineTemplate:
+    spec:
+      template:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: demo.vcluster.com/mock-gpu-host
+                        operator: In
+                        values: ["true"]
+          domain:
+            resources:
+              # What the provider cluster's scheduler reserves per VM.
+              requests:
+                cpu: "1"
+                memory: 3Gi
+
+# Optional: a cloud-init flavor of the same VM. Use this when you'd rather attach
+# the MachineConfigTemplate on the NodeType than on the tenant cluster's pool
+# (platform/cluster-templates/nvml-mock-kubevirt-cloud-init.yaml does it on the pool).
+# The two NodeTypes share maxCapacity per host only through the host's real
+# resources, so keep their sum within what the mock host holds.
+- name: kvm-mock-gpu-cloud-init
+  displayName: KVM VM + 1 simulated GPU, nvml-mock from cloud-init (2 CPU, 3 GiB)
+  maxCapacity: 4
+  resources:
+    cpu: "2"
+    memory: 3Gi
+    nvidia.com/gpu: "1"
+  properties:
+    kubevirt.vcluster.com/capacity-type: on-demand
+    kubevirt.vcluster.com/root-disk-size: 30Gi
+    vcluster.com/accelerator: mock-gpu
+    vcluster.com/user-data-template-config: nvml-mock-b200
+  mergeVirtualMachineTemplate:
+    spec:
+      template:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: demo.vcluster.com/mock-gpu-host
+                        operator: In
+                        values: ["true"]
+          domain:
+            resources:
+              requests:
+                cpu: "1"
+                memory: 3Gi
+
+# Every other NodeType on the provider should stay off the mock host, so it keeps
+# its slots for simulated GPUs. Add this to their mergeVirtualMachineTemplate:
+#
+#   affinity:
+#     nodeAffinity:
+#       requiredDuringSchedulingIgnoredDuringExecution:
+#         nodeSelectorTerms:
+#           - matchExpressions:
+#               - key: demo.vcluster.com/mock-gpu-host
+#                 operator: DoesNotExist

@@ -1,0 +1,122 @@
+apiVersion: management.loft.sh/v1
+kind: VirtualClusterTemplate
+metadata:
+  name: nvml-mock-kubevirt-cloud-init
+  annotations:
+    vcluster.com/template-icon: gpu.svg
+spec:
+  displayName: Private Nodes - KubeVirt VMs with Simulated GPUs (nvml-mock from cloud-init)
+  description: |
+    Same as nvml-mock-kubevirt, but nvml-mock is part of the machine, not the Stack:
+    the GPU pool's MachineConfigTemplate installs it on each VM from cloud-init, and the
+    Stack only deploys the GPU Operator, as it would on a node with a real driver.
+    Each VM reports one simulated GPU. For demos only: no physical GPU is involved and
+    nothing CUDA runs. Shares the mock GPU host with the other nvml-mock templates.
+  owner:
+    team: loft-admins
+  parameters:
+    - variable: kubernetesVersion
+      label: Kubernetes Version
+      description: |
+        Control plane Kubernetes version. Updating this value triggers a rolling upgrade of the vCluster control plane. The VM node kubelets are re-provisioned separately via the NodeClaim lifecycle.
+      options:
+        - v1.34.12
+        - v1.35.9
+        - v1.36.5
+      defaultValue: v1.36.5
+      section: Control Plane
+    - variable: gpuVMCount
+      label: GPU VMs
+      description: One simulated GPU each. The mock host fits four.
+      type: number
+      required: true
+      options:
+        - '1'
+        - '2'
+        - '3'
+        - '4'
+      defaultValue: '4'
+      section: Control Plane
+    - variable: machineConfigTemplate
+      label: Simulated GPU Machine Config
+      description: The MachineConfigTemplate that installs nvml-mock (cloud-init/render.sh makes one
+        per GPU profile, named nvml-mock-<profile>).
+      type: string
+      required: true
+      options:
+        - nvml-mock-b200
+      defaultValue: nvml-mock-b200
+      section: Simulated GPUs
+    - variable: argoProject
+      label: Argo CD Project
+      type: string
+      defaultValue: default
+      section: Argo CD
+  template:
+    pro:
+      enabled: true
+    helmRelease:
+      chart:
+        name: vcluster
+        repo: https://charts.loft.sh
+        version: "0.37.3"
+      values: |-
+        privateNodes:
+          enabled: true
+          vpn:
+            enabled: true
+          autoNodes:
+            - provider: KUBEVIRT_NODE_PROVIDER
+              static:
+                - name: gpu
+                  quantity: {{ .Values.gpuVMCount }}
+                  # No NodeProfile: gpu-compute's nvidia.com/gpu taint would leave
+                  # CoreDNS and the GPU Operator controllers nowhere to run, since
+                  # there is no CPU service VM. The pool label alone is enough for
+                  # the device plugin and the gate.
+                  # Installs nvml-mock from cloud-init, before the join; the node comes up
+                  # already looking like a GPU node with a driver.
+                  properties:
+                    vcluster.com/user-data-template-config: {{ .Values.machineConfigTemplate | quote }}
+                  nodeLabels:
+                    workload.example.com/pool: gpu-compute
+                    demo.vcluster.com/simulated-gpu: "true"
+                    # nvml-mock is the driver and the container toolkit. These keep a
+                    # real-GPU GPU Operator install (driver and toolkit on) from deploying
+                    # either here; the mock values leave them off anyway.
+                    nvidia.com/gpu.deploy.driver: "false"
+                    nvidia.com/gpu.deploy.container-toolkit: "false"
+                  nodeTypeSelector:
+                    - property: vcluster.com/node-type
+                      value: MOCK_GPU_NODE_TYPE
+        # Must not overlap the KubeVirt provider cluster's pod and service CIDRs: with
+        # bridge binding each VM takes its virt-launcher pod's IP, so node IPs are
+        # provider pod IPs.
+        networking:
+          podCIDR: TENANT_POD_CIDR
+          serviceCIDR: TENANT_SERVICE_CIDR
+        controlPlane:
+          backingStore:
+            etcd:
+              embedded:
+                enabled: true
+          distro:
+            k8s:
+              version: "{{ .Values.kubernetesVersion }}"
+        integrations:
+          argoCD:
+            enabled: true
+            connector: ARGOCD_CONNECTOR
+        deploy:
+          cni:
+            flannel:
+              enabled: true
+          stacks:
+            - name: gpu
+              displayName: Demo - GPU Operator (nvml-mock preinstalled)
+              templateRef:
+                name: nvml-mock-gpu-preinstalled
+              parameters:
+                minGPUs: {{ .Values.gpuVMCount | quote }}
+                gpuNodePool: gpu-compute
+                argoProject: {{ .Values.argoProject | quote }}

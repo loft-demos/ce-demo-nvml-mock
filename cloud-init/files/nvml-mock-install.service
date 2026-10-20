@@ -1,0 +1,13 @@
+[Unit]
+Description=Install NVIDIA nvml-mock once this node has joined its tenant cluster
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/nvml-mock-install.sh
+TimeoutStartSec=90min
+
+[Install]
+WantedBy=multi-user.target

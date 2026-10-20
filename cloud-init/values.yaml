@@ -1,0 +1,12 @@
+# nvml-mock chart values the generator renders the profile with. Same as the
+# nvml-mock-driver Argo CD task, so cloud-init nodes and DaemonSet nodes report the
+# same thing. gpu.profile and gpu.count come from PROFILE and GPU_COUNT.
+gpu:
+  dynamicMetrics:
+    enabled: true
+    utilization:
+      pattern: steady
+      gpu_min: 15
+      gpu_max: 75
+      memory_min: 10
+      memory_max: 60

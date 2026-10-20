@@ -1,0 +1,69 @@
+# Add to your Metal3 NodeProvider's spec.metal3.nodeTypes (snippet, not a full object).
+#
+# A simulated "HGX B200" server: any bare metal host (or VM-backed BMH) whose GPUs come
+# from NVIDIA nvml-mock, installed by cloud-init before the join. Everything mock-specific
+# lives here, so tenant cluster templates select it like real GPU capacity
+# (vcluster.com/accelerator: b200) and their nodes join with a "driver" already running.
+#
+# Mark the host as a GPU server in your inventory first. With the NetBox import:
+#   device type: manufacturer NVIDIA, model "HGX B200 8-GPU (simulated)", slug hgx-b200
+#   device:      that device type, role gpu-compute, tag your import tag
+# The import relabels its BareMetalHost (netbox.vcluster.com/device-type=hgx-b200, ...).
+# Without NetBox, label the BareMetalHost yourself and select on those labels instead.
+#
+# Watch other NodeTypes' selectors: one that matches every gpu-compute host in a rack (as
+# a real GPU pool often does) would claim this host too. Give it a device-type key.
+- name: rack-b-b200-xlarge
+  resources:
+    cpu: "8"
+    memory: 16Gi
+    # Declared so the NodeType advertises GPU capacity (and dynamic pools can launch it).
+    nvidia.com/gpu: "8"
+  bareMetalHosts:
+    selector:
+      matchLabels:
+        machines.vcluster.com/source: netbox
+        netbox.vcluster.com/rack: rack-b
+        netbox.vcluster.com/role: gpu-compute
+        netbox.vcluster.com/device-type: hgx-b200
+  properties:
+    vcluster.com/accelerator: b200
+    vcluster.com/cpu: "8"
+    vcluster.com/memory: 16Gi
+    vcluster.com/profile: xlarge-gpu
+    vcluster.com/rack: rack-b
+    # The "driver": nvml-mock from cloud-init. MachineConfigTemplate hgx-b200, rendered
+    # with the GPU count built in (NAME=hgx-b200 GPU_COUNT=8 cloud-init/render.sh) and
+    # named for the server type, because every NodeType property also becomes a node
+    # label. The provider and NodeType must not set vcluster.com/user-data, -template or
+    # -template-secret, which would win.
+    vcluster.com/user-data-template-config: hgx-b200
+    # Single-valued properties become node labels: driver and container toolkit are
+    # preinstalled, so the GPU Operator must not deploy them on this node.
+    nvidia.com/gpu.deploy.driver: "false"
+    nvidia.com/gpu.deploy.container-toolkit: "false"
+
+# A simulated GB300 NVL72 compute tray (4 GPUs), using the multi-profile template
+# nvidia-gpu-server, which picks the GB300 profile from vcluster.com/accelerator.
+# NetBox: device type "GB300 NVL72 compute tray (simulated)", slug gb300-tray.
+# No kubernetes.io/arch property: real trays are arm64 (Grace); an arm64 label on an
+# x86 host would break every pod scheduled there.
+- name: rack-a-gb300-tray
+  resources:
+    cpu: "8"
+    memory: 16Gi
+    nvidia.com/gpu: "4"
+  bareMetalHosts:
+    selector:
+      matchLabels:
+        machines.vcluster.com/source: netbox
+        netbox.vcluster.com/rack: rack-a
+        netbox.vcluster.com/role: gpu-compute
+        netbox.vcluster.com/device-type: gb300-tray
+  properties:
+    vcluster.com/accelerator: gb300
+    vcluster.com/profile: gpu-tray
+    vcluster.com/rack: rack-a
+    vcluster.com/user-data-template-config: nvidia-gpu-server
+    nvidia.com/gpu.deploy.driver: "false"
+    nvidia.com/gpu.deploy.container-toolkit: "false"

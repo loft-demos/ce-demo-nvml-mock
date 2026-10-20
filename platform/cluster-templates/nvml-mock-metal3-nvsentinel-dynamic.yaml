@@ -1,0 +1,161 @@
+apiVersion: management.loft.sh/v1
+kind: VirtualClusterTemplate
+metadata:
+  name: nvml-mock-metal3-nvsentinel-dynamic
+  annotations:
+    vcluster.com/template-icon: gpu.svg
+spec:
+  displayName: Private Nodes - Metal3 GPU Servers with NVSentinel and Spare Servers (simulated GPUs)
+  description: |
+    Whole bare metal GPU servers launched on demand by the tenant's GPU workload, with
+    NVSentinel watching them. When a GPU fails, NVSentinel quarantines and drains its
+    server, the workload's pods go Pending, Auto Nodes provisions a spare server through
+    Metal3, and the drained server is retired and deprovisioned back into the pool. The
+    servers' GPUs are simulated by NVIDIA nvml-mock, installed from cloud-init by their
+    NodeType (docs/metal3-b200.md); nothing CUDA runs.
+  owner:
+    team: loft-admins
+  parameters:
+    - variable: kubernetesVersion
+      label: Kubernetes Version
+      description: |
+        Control plane Kubernetes version. Updating this value triggers a rolling upgrade of the vCluster control plane. The servers are re-provisioned separately via the NodeClaim lifecycle.
+      options:
+        - v1.34.12
+        - v1.35.9
+        - v1.36.5
+      defaultValue: v1.36.5
+      section: Control Plane
+    - variable: gpuServers
+      label: GPU Servers
+      description: Servers the workload fills (one pod per GPU).
+      type: number
+      required: true
+      options:
+        - '1'
+        - '2'
+      defaultValue: '1'
+      section: GPU Servers
+    - variable: spareServers
+      label: Spare Servers
+      description: Replacement capacity Auto Nodes may provision when a server is quarantined.
+      type: number
+      required: true
+      options:
+        - '0'
+        - '1'
+      defaultValue: '1'
+      section: GPU Servers
+    - variable: gpusPerServer
+      label: GPUs Per Server
+      description: The GPU NodeType's nvidia.com/gpu (8 for B200 and A100, 4 for a GB300 tray).
+      type: number
+      required: true
+      options:
+        - '4'
+        - '8'
+      defaultValue: '8'
+      section: GPU Servers
+    - variable: accelerator
+      label: Accelerator
+      description: vcluster.com/accelerator of the GPU servers to use.
+      type: string
+      required: true
+      options:
+        - b200
+        - a100
+        - gb300
+      defaultValue: b200
+      section: GPU Servers
+    - variable: argoProject
+      label: Argo CD Project
+      type: string
+      defaultValue: default
+      section: Argo CD
+  template:
+    pro:
+      enabled: true
+    helmRelease:
+      chart:
+        name: vcluster
+        repo: https://charts.loft.sh
+        version: "0.37.3"
+      values: |-
+        privateNodes:
+          enabled: true
+          vpn:
+            enabled: true
+          autoNodes:
+            - provider: METAL3_NODE_PROVIDER
+              static:
+                # cert-manager, MongoDB, fault-quarantine and node-drainer, off the GPU
+                # servers so draining one never evicts the pipeline doing it.
+                - name: cpu
+                  quantity: 1
+                  nodeLabels:
+                    workload.example.com/pool: cpu-services
+                  nodeTypeSelector:
+                    - property: vcluster.com/node-type
+                      value: METAL3_CPU_NODE_TYPE
+              dynamic:
+                # Every GPU server. Launched for the workload's Pending GPU pods, capped at
+                # the active servers plus the spares. Tainted so only GPU pods trigger it.
+                # Selects by accelerator, not by the short node-type alias (which breaks
+                # consolidation; see docs/runbook.md).
+                - name: gpu
+                  nodeTypeSelector:
+                    - property: vcluster.com/accelerator
+                      value: {{ .Values.accelerator | quote }}
+                  nodeLabels:
+                    workload.example.com/pool: gpu-compute
+                  taints:
+                    - key: nvidia.com/gpu
+                      value: "true"
+                      effect: NoSchedule
+                  limits:
+                    nvidia.com/gpu: '{{ mul (add (int .Values.gpuServers) (int .Values.spareServers)) (int .Values.gpusPerServer) }}'
+                  # A drained, quarantined server is empty and dynamic, so it is retired a
+                  # minute after its drain and Metal3 deprovisions it.
+                  disruption:
+                    consolidationPolicy: WhenEmptyOrUnderutilized
+                    consolidateAfter: 1m
+                # Never launches anything (limits cpu 0). When the spare takes the last GPU
+                # server, the GPU pool has no launchable instance type, and with none in any
+                # dynamic pool Karpenter can't build its scheduler, so it can't even retire
+                # the failed server. A pool on an always-available type keeps that working.
+                - name: scheduler-headroom
+                  nodeTypeSelector:
+                    - property: vcluster.com/node-type
+                      value: METAL3_HEADROOM_NODE_TYPE
+                  limits:
+                    cpu: "0"
+        networking:
+          podCIDR: TENANT_POD_CIDR
+          serviceCIDR: TENANT_SERVICE_CIDR
+        controlPlane:
+          backingStore:
+            etcd:
+              embedded:
+                enabled: true
+          distro:
+            k8s:
+              version: "{{ .Values.kubernetesVersion }}"
+        integrations:
+          argoCD:
+            enabled: true
+            connector: ARGOCD_CONNECTOR
+        deploy:
+          cni:
+            flannel:
+              enabled: true
+          stacks:
+            - name: gpu
+              displayName: Demo - GPU Operator and NVSentinel (nvml-mock preinstalled)
+              templateRef:
+                name: nvml-mock-gpu-nvsentinel-preinstalled
+              parameters:
+                minGPUs: {{ mul (int .Values.gpuServers) (int .Values.gpusPerServer) | quote }}
+                gpuNodes: {{ .Values.gpuServers | quote }}
+                gpuNodePool: gpu-compute
+                cpuNodePool: cpu-services
+                argoProject: {{ .Values.argoProject | quote }}

@@ -1,0 +1,16 @@
+[Unit]
+Description=NVIDIA nvml-mock node agent (simulated GPU driver)
+After=nvml-mock-install.service containerd.service
+Requires=nvml-mock-install.service
+ConditionPathExists=/var/lib/nvml-mock-install/installed
+
+[Service]
+ExecStart=/usr/local/sbin/nvml-mock-agent-start.sh
+ExecStartPost=-/bin/systemctl start --no-block nvml-mock-nri.service
+Restart=always
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

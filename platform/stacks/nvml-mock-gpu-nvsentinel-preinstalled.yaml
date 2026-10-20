@@ -1,0 +1,148 @@
+apiVersion: management.loft.sh/v1
+kind: StackTemplate
+metadata:
+  name: nvml-mock-gpu-nvsentinel-preinstalled
+spec:
+  displayName: Demo - GPU Operator and NVSentinel for nodes with nvml-mock preinstalled
+  description: For GPU nodes whose nvml-mock comes from cloud-init (MachineConfigTemplate), such as
+    simulated multi-GPU servers. Deploys the GPU workload first (so a dynamic GPU pool launches the
+    servers), then cert-manager, the GPU Operator with standalone DCGM, and NVSentinel's full
+    pipeline. Gated on the GPUs the scheduler can see and on a host engine per GPU node.
+  icon: https://assets.nvidiagrid.net/ngc/logos/GPUoperator.png
+  owner:
+    team: loft-admins
+  parameters:
+    - variable: minGPUs
+      label: GPU Nodes
+      description: Simulated GPUs the scheduler must advertise, and standalone DCGM pods that must be ready,
+        before NVSentinel starts. One GPU per node, so this is also the GPU node count.
+      type: number
+      required: true
+      defaultValue: '1'
+    - variable: gpuNodes
+      label: GPU Nodes
+      description: GPU nodes the Stack waits for (one DCGM host engine each). minGPUs / GPUs per node.
+      type: number
+      required: true
+      defaultValue: '1'
+    - variable: gpuNodePool
+      label: GPU Pool Label
+      type: string
+      required: true
+      defaultValue: gpu-compute
+    - variable: cpuNodePool
+      label: CPU Service Pool Label
+      description: Value of workload.example.com/pool on the CPU service worker for cert-manager and the
+        NVSentinel pipeline.
+      type: string
+      required: true
+      defaultValue: cpu-services
+    - variable: gpuOperatorVersion
+      label: GPU Operator Version
+      type: string
+      defaultValue: v26.3.3
+    - variable: nvsentinelVersion
+      label: NVSentinel Version
+      type: string
+      defaultValue: v1.21.0
+    - variable: argoProject
+      label: Argo CD Project
+      type: string
+      defaultValue: default
+  publishedOutputs:
+    - name: gpucount
+      fromTask:
+        task: gpuready
+        output: gpucount
+  tasks:
+    # No dependencies, so it starts at once: its pods request nvidia.com/gpu and stay
+    # Pending until GPU nodes exist, which is what makes the dynamic GPU pool launch them.
+    # Healthy once every pod runs, i.e. once nvml-mock and the device plugin are up on them.
+    - name: gpu-workload
+      timeout: 30m0s
+      argoCDApplication:
+        templateRef:
+          name: nvml-mock-gpu-workload
+        parameters:
+          project: '{{ .Values.argoProject }}'
+          replicas: '{{ .Values.minGPUs }}'
+    - name: cert-manager
+      timeout: 15m0s
+      argoCDApplication:
+        templateRef:
+          name: nvml-mock-cert-manager
+        parameters:
+          cpuNodePool: '{{ .Values.cpuNodePool }}'
+          project: '{{ .Values.argoProject }}'
+    # nvml-mock is already on the hosts, so the GPU Operator has nothing to wait for.
+    - name: gpu-operator
+      timeout: 30m0s
+      argoCDApplication:
+        templateRef:
+          name: nvml-mock-gpu-operator
+        parameters:
+          project: '{{ .Values.argoProject }}'
+          version: '{{ .Values.gpuOperatorVersion }}'
+          gpuNodePool: '{{ .Values.gpuNodePool }}'
+          standaloneDCGM: 'true'
+    - name: gpuready
+      dependsOn:
+        - gpu-operator
+      timeout: 30m0s
+      argoCDApplication:
+        templateRef:
+          name: nvml-mock-stack-gate
+        parameters:
+          project: '{{ .Values.argoProject }}'
+          cpuNodePool: '{{ .Values.cpuNodePool }}'
+          capacityMin: '{{ .Values.minGPUs }}'
+          capacityNodeSelector: 'workload.example.com/pool={{ .Values.gpuNodePool }}'
+          contractName: mock-gpu-contract
+          contractData: |
+            gpuPool: {{ .Values.gpuNodePool }}
+            simulated: "true"
+          waitEnabled: 'false'
+      outputs:
+        - name: gpucount
+          fromResource:
+            apiVersion: v1
+            kind: ConfigMap
+            namespace: gpu-stack
+            name: mock-gpu-contract
+            jsonPath: '{.data.observedCount}'
+    # NVSentinel dials nv-hostengine, which the operator creates alongside dcgm-exporter
+    # with nothing ordering them; wait until every GPU node's host engine is serving.
+    - name: dcgmready
+      dependsOn:
+        - gpu-operator
+      timeout: 15m0s
+      argoCDApplication:
+        templateRef:
+          name: nvml-mock-stack-gate
+        parameters:
+          project: '{{ .Values.argoProject }}'
+          cpuNodePool: '{{ .Values.cpuNodePool }}'
+          releaseName: dcgm-ready
+          waitResource: daemonset/nvidia-dcgm
+          waitNamespace: gpu-operator
+          waitCondition: 'jsonpath={.status.numberReady}={{ .Values.gpuNodes }}'
+          watchAPIGroup: apps
+          watchResources: daemonsets
+          capacityMin: '0'
+          # Its own name, never '': an empty parameter is dropped and the gate's default
+          # contract name applies, so two gates would overwrite one ConfigMap.
+          contractName: dcgm-ready-contract
+    - name: nvsentinel
+      dependsOn:
+        - gpuready
+        - dcgmready
+        - cert-manager
+      timeout: 30m0s
+      argoCDApplication:
+        templateRef:
+          name: nvml-mock-nvsentinel
+        parameters:
+          project: '{{ .Values.argoProject }}'
+          version: '{{ .Values.nvsentinelVersion }}'
+          cpuNodePool: '{{ .Values.cpuNodePool }}'
+          gpuNodePool: '{{ .Values.gpuNodePool }}'

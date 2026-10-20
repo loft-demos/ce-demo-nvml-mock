@@ -1,0 +1,116 @@
+apiVersion: management.loft.sh/v1
+kind: VirtualClusterTemplate
+metadata:
+  name: nvml-mock-metal3-cloud-init
+  annotations:
+    vcluster.com/template-icon: gpu.svg
+spec:
+  displayName: Private Nodes - Metal3 Servers with Simulated GPUs (nvml-mock from cloud-init)
+  description: |
+    Whole bare metal GPU servers from the Metal3 NodeProvider, selected like real GPU
+    capacity (vcluster.com/accelerator). The servers' GPUs are simulated by NVIDIA nvml-mock,
+    which their NodeType installs from cloud-init (platform/metal3/node-type-snippet.yaml), so
+    nothing in this template or the tenant cluster is mock-specific. The Stack only deploys
+    the GPU Operator. For demos only: no physical GPU is involved and nothing CUDA runs.
+  owner:
+    team: loft-admins
+  parameters:
+    - variable: kubernetesVersion
+      label: Kubernetes Version
+      description: |
+        Control plane Kubernetes version. Updating this value triggers a rolling upgrade of the vCluster control plane. The servers are re-provisioned separately via the NodeClaim lifecycle.
+      options:
+        - v1.34.12
+        - v1.35.9
+        - v1.36.5
+      defaultValue: v1.36.5
+      section: Control Plane
+    - variable: serverCount
+      label: GPU Servers
+      description: Bare metal hosts, each one simulated GPU server.
+      type: number
+      required: true
+      options:
+        - '1'
+        - '2'
+      defaultValue: '1'
+      section: GPU Servers
+    - variable: gpusPerServer
+      label: GPUs Per Server
+      description: The NodeType's nvidia.com/gpu (8 for B200 and A100, 4 for a GB300 tray); the Stack waits for servers x this many.
+      type: number
+      required: true
+      options:
+        - '4'
+        - '8'
+      defaultValue: '8'
+      section: GPU Servers
+    - variable: accelerator
+      label: Accelerator
+      description: vcluster.com/accelerator of the GPU servers to use.
+      type: string
+      required: true
+      options:
+        - b200
+        - a100
+        - gb300
+      defaultValue: b200
+      section: GPU Servers
+    - variable: argoProject
+      label: Argo CD Project
+      type: string
+      defaultValue: default
+      section: Argo CD
+  template:
+    pro:
+      enabled: true
+    helmRelease:
+      chart:
+        name: vcluster
+        repo: https://charts.loft.sh
+        version: "0.37.3"
+      values: |-
+        privateNodes:
+          enabled: true
+          vpn:
+            enabled: true
+          autoNodes:
+            - provider: METAL3_NODE_PROVIDER
+              static:
+                # Whole servers, reserved, not autoscaled. No nvidia.com/gpu taint, so
+                # CoreDNS and the GPU Operator controllers run on the servers too.
+                - name: gpu
+                  quantity: {{ .Values.serverCount }}
+                  nodeLabels:
+                    workload.example.com/pool: gpu-compute
+                  nodeTypeSelector:
+                    - property: vcluster.com/accelerator
+                      value: {{ .Values.accelerator | quote }}
+        networking:
+          podCIDR: TENANT_POD_CIDR
+          serviceCIDR: TENANT_SERVICE_CIDR
+        controlPlane:
+          backingStore:
+            etcd:
+              embedded:
+                enabled: true
+          distro:
+            k8s:
+              version: "{{ .Values.kubernetesVersion }}"
+        integrations:
+          argoCD:
+            enabled: true
+            connector: ARGOCD_CONNECTOR
+        deploy:
+          cni:
+            flannel:
+              enabled: true
+          stacks:
+            - name: gpu
+              displayName: Demo - GPU Operator (nvml-mock preinstalled)
+              templateRef:
+                name: nvml-mock-gpu-preinstalled
+              parameters:
+                minGPUs: {{ mul (int .Values.serverCount) (int .Values.gpusPerServer) | quote }}
+                gpuNodePool: gpu-compute
+                argoProject: {{ .Values.argoProject | quote }}
